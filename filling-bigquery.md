@@ -1,0 +1,12 @@
+Filling in a Google BigQuery Data Warehouse
+
+There is a vast array of methods, scripts, connectors, and cloud services to accumulate/ingest data into BigQuery. Choosing the right option is a delicate balance of the technical requirements, the end stakeholder, and business cost. Weighing all of this consideration, we can combine these methods to create data warehouse assets by designing data pipelines to the best practices in GCP. The rest of this document is focused on LoadingData into a Cloud Data Warehouse, particularly Google BigQuery, the processes, the technologies, and the people roles in the complete data pipeline best practices and big picture.
+
+I mentioned that there are different data pipeline process designs, but most of the time, we only want ELT, and then, based on the requirements, we choose to batch or stream the data. But what about the coordinating and monitoring of the data pipeline?
+
+Yes! We have our process, data flow, and architecture wise we coordinate by Choreography or Orchestration. We have our ELT process automation; you need to think, plan, and code somewhere in some language the whole process; this gets into Infrastructure as Code (Git/Terraform/Containers), but I'm going to hold off until you are ready. Coordination of "Workflow" and Monitoring structure of tasks and processes within the data pipeline, including their dependencies with either a set of Choreography technologies or Orchestration technologies. Since data pipelines are complex systems with multiple components, they must be monitored to ensure smooth performance and quick error correction. We must build out our monitoring, logging, and alerting mechanisms that also consider maintaining data integrity; use Cloud Logging & Monitoring! Please, use Cloud Logging. 
+
+Here is a link to an article on Google Cloud Blog that explains how to monitor cloud data pipelines using SRE principles and the four golden signals as the metrics to build a monitoring dashboard for your data pipelines. The article also explains how Cloud Monitoring provides an integrated set of metrics that are automatically collected for Google Cloud services. Using Cloud Monitoring, you can build dashboards to visualize the metrics for your data pipelines. Additionally, some services, including Dataflow, Kubernetes Engine, and Compute Engine, have metrics that are surfaced directly in their respective Uls and the Monitoring UI.
+
+NOTE I DID NOT MENTION ANY DATA PIPELINE BENEFITS. IT IS ABOUT BEING INSIGHT-DRIVEN; WE EITHER ENHANCE OR CHANGE FROM FEEDBACK, WHICH IS DATA.
+
