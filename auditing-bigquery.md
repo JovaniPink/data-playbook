@@ -110,7 +110,7 @@ FROM
 WHERE
   methodName = 'storage.objects.get';
 
-# Get all Cloud Audit Logs for data access events that occurred between the dates "2023-11-01" and "2023-11-02".
+# Get all Cloud Audit Logs for data access events between "2023-11-01" and "2023-11-02".
 SELECT
   *
 FROM
@@ -128,7 +128,7 @@ FROM
 WHERE
   status.code = 403;
 
-# Get all Cloud Audit Logs for data access events that were initiated from the IP address "192.168.1.1".
+# Get all Cloud Audit Logs for data access events initiated from the IP address "192.168.1.1".
 SELECT
   *
 FROM
@@ -137,13 +137,27 @@ WHERE
   sourceIp = '192.168.1.1';
 ```
 
-You can also combine these queries to create more complex queries. For example, you could query for all Cloud Audit Logs for data access events for a specific resource that were initiated by a specific user and that resulted in a specific status code.
+You can also combine these queries to create more complex queries. For example, you could query all Cloud Audit Logs for data access events for a specific resource that were initiated by a specific user and that resulted in a specific status code.
 
-I hope this helps!
-
-Certainly! Google Cloud Audit Logs capture a variety of activities and accesses within your Google Cloud environment. The `cloudaudit_googleapi_com_data_access` table specifically captures data access events.
-
-Here's a set of example queries for the `cloudaudit_googleapi_com_data_access` table in BigQuery:
+```sql
+SELECT
+  timestamp,
+  logName,
+  insertId,
+  protopayload_auditlog AS protoPayload,
+  protopayload_auditlog.methodName AS methodName,
+  protopayload_auditlog.resourceName AS resourceName,
+  protopayload_auditlog.metadataJson AS metadata
+FROM
+  `YOUR_PROJECT.YOUR_DATASET.cloudaudit_googleapis_com_activity`
+WHERE
+  timestamp >= "2022-01-01"
+  AND timestamp < "2022-12-31"
+  AND protopayload_auditlog.serviceName="bigquery.googleapis.com"
+  AND protopayload_auditlog.methodName = "google.cloud.bigquery.v2.TableService.InsertTable"
+ORDER BY
+  timestamp DESC
+```
 
 1. **Count of Data Access Events by Resource Type**
 ```sql
@@ -208,5 +222,3 @@ WHERE
 ORDER BY
   timestamp DESC;
 ```
-
-Remember to replace `YOUR_PROJECT_ID` and `YOUR_DATASET_ID` with your specific project and dataset IDs. These queries are just starting points; you can further refine and customize them based on your specific needs and the structure of your audit logs.
