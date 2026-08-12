@@ -1,43 +1,433 @@
-import os
+"""Validate a tar archive and publish its regular files to Cloud Storage.
+
+The publication contract is intentionally conservative: every archive member is
+validated before extraction, objects are create-only, and the manifest is
+written last. A manifest therefore marks a complete publication.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
 import tarfile
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from google.api_core.exceptions import PreconditionFailed
 from google.cloud import storage
 
-def untar_gzip_to_temp(gzip_file):
-    # Create a temporary directory
-    temp_dir = tempfile.mkdtemp()
-    
-    # Extract the gzip file
-    with tarfile.open(gzip_file, "r:gz") as tar:
-        tar.extractall(path=temp_dir)
-    
-    return temp_dir
+DEFAULT_MAX_MEMBERS = 10_000
+DEFAULT_MAX_BYTES = 1_073_741_824
+MANIFEST_NAME = "_manifest.json"
+READ_CHUNK_SIZE = 1024 * 1024
 
-def upload_files_to_gcs(bucket_name, source_folder):
-    # Initialize GCS client
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
 
-    # Upload files
-    for filename in os.listdir(source_folder):
-        blob = bucket.blob(filename)
-        blob.upload_from_filename(os.path.join(source_folder, filename))
+class ArchiveValidationError(ValueError):
+    """The archive does not satisfy the bounded extraction contract."""
 
-def main():
-    # Path to your gzip file
-    gzip_file = 'path_to_your_gzip_file.tar.gz'
 
-    # GCS bucket name
-    bucket_name = 'your_gcs_bucket_name'
+class PublicationConflict(RuntimeError):
+    """An object already exists with content different from this publication."""
 
-    # Untar the file
-    temp_dir = untar_gzip_to_temp(gzip_file)
 
-    # Upload to GCS
-    upload_files_to_gcs(bucket_name, temp_dir)
+@dataclass(frozen=True)
+class PreparedFile:
+    """A validated, extracted regular file and its immutable lineage."""
 
-    # Cleanup: Optionally delete the temp directory after upload
-    # os.rmdir(temp_dir)
+    path: str
+    local_path: Path
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class PreparedArchive:
+    """The extracted files and deterministic archive manifest."""
+
+    archive_path: Path
+    archive_size: int
+    archive_sha256: str
+    files: tuple[PreparedFile, ...]
+
+    @property
+    def total_uncompressed_bytes(self) -> int:
+        return sum(item.size for item in self.files)
+
+    def manifest(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "archive": {
+                "name": self.archive_path.name,
+                "sha256": self.archive_sha256,
+                "size": self.archive_size,
+            },
+            "file_count": len(self.files),
+            "total_uncompressed_bytes": self.total_uncompressed_bytes,
+            "files": [
+                {"path": item.path, "sha256": item.sha256, "size": item.size}
+                for item in self.files
+            ],
+        }
+
+    def manifest_bytes(self) -> bytes:
+        payload = json.dumps(
+            self.manifest(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        return f"{payload}\n".encode()
+
+
+@dataclass(frozen=True)
+class PublicationResult:
+    """The object-level result of a completed publication."""
+
+    bucket: str
+    prefix: str
+    uploaded: tuple[str, ...]
+    existing: tuple[str, ...]
+    manifest_object: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "bucket": self.bucket,
+            "prefix": self.prefix,
+            "uploaded": list(self.uploaded),
+            "existing": list(self.existing),
+            "manifest_object": self.manifest_object,
+        }
+
+
+@dataclass(frozen=True)
+class _Member:
+    member: tarfile.TarInfo
+    path: str
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(READ_CHUNK_SIZE), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalise_member_path(name: str) -> str | None:
+    if "\x00" in name:
+        raise ArchiveValidationError("archive member names cannot contain NUL bytes")
+    if "\\" in name:
+        raise ArchiveValidationError(f"archive member uses a backslash: {name!r}")
+
+    raw = PurePosixPath(name)
+    if raw.is_absolute():
+        raise ArchiveValidationError(f"archive member is absolute: {name!r}")
+
+    parts = tuple(part for part in raw.parts if part not in ("", "."))
+    if any(part == ".." for part in parts):
+        raise ArchiveValidationError(f"archive member escapes the root: {name!r}")
+    if not parts:
+        return None
+    return PurePosixPath(*parts).as_posix()
+
+
+def _inspect_members(
+    archive: tarfile.TarFile, *, max_members: int, max_bytes: int
+) -> tuple[_Member, ...]:
+    if max_members <= 0:
+        raise ArchiveValidationError("max_members must be greater than zero")
+    if max_bytes <= 0:
+        raise ArchiveValidationError("max_bytes must be greater than zero")
+
+    accepted: list[_Member] = []
+    seen: set[str] = set()
+    total_bytes = 0
+
+    # Iterate lazily so the member ceiling stops header parsing instead of first
+    # materializing an unbounded list with TarFile.getmembers().
+    for member in archive:
+        path = _normalise_member_path(member.name)
+        if path is None:
+            if member.isdir():
+                continue
+            raise ArchiveValidationError("the archive root must be a directory")
+
+        if not (member.isdir() or member.isreg()):
+            raise ArchiveValidationError(
+                f"archive member is not a regular file or directory: {member.name!r}"
+            )
+        if path in seen:
+            raise ArchiveValidationError(
+                f"archive contains a duplicate normalized path: {path!r}"
+            )
+
+        seen.add(path)
+        accepted.append(_Member(member=member, path=path))
+        if len(accepted) > max_members:
+            raise ArchiveValidationError(
+                f"archive exceeds the {max_members:,} member limit"
+            )
+
+        if member.isreg():
+            if member.size < 0:
+                raise ArchiveValidationError(
+                    f"archive member has a negative size: {member.name!r}"
+                )
+            total_bytes += member.size
+            if total_bytes > max_bytes:
+                raise ArchiveValidationError(
+                    f"archive exceeds the {max_bytes:,} byte limit"
+                )
+
+    file_paths = {item.path for item in accepted if item.member.isreg()}
+    if not file_paths:
+        raise ArchiveValidationError("archive contains no regular files")
+
+    for file_path in file_paths:
+        prefix = f"{file_path}/"
+        if any(other.startswith(prefix) for other in seen if other != file_path):
+            raise ArchiveValidationError(
+                f"regular file is also used as a parent path: {file_path!r}"
+            )
+
+    return tuple(accepted)
+
+
+def _extract_files(
+    archive: tarfile.TarFile, members: tuple[_Member, ...], destination: Path
+) -> tuple[PreparedFile, ...]:
+    prepared: list[PreparedFile] = []
+    for item in sorted(members, key=lambda value: value.path):
+        if item.member.isdir():
+            continue
+
+        local_path = destination.joinpath(*PurePosixPath(item.path).parts)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        source = archive.extractfile(item.member)
+        if source is None:
+            raise ArchiveValidationError(
+                f"could not read regular file: {item.member.name!r}"
+            )
+
+        digest = hashlib.sha256()
+        bytes_written = 0
+        with source, local_path.open("xb") as target:
+            while chunk := source.read(READ_CHUNK_SIZE):
+                target.write(chunk)
+                digest.update(chunk)
+                bytes_written += len(chunk)
+
+        if bytes_written != item.member.size:
+            raise ArchiveValidationError(
+                f"archive member size changed while reading: {item.member.name!r}"
+            )
+        prepared.append(
+            PreparedFile(
+                path=item.path,
+                local_path=local_path,
+                size=bytes_written,
+                sha256=digest.hexdigest(),
+            )
+        )
+
+    return tuple(prepared)
+
+
+@contextmanager
+def prepare_archive(
+    archive_path: str | Path,
+    *,
+    max_members: int = DEFAULT_MAX_MEMBERS,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> Iterator[PreparedArchive]:
+    """Validate and extract an archive into a self-cleaning temporary directory."""
+
+    path = Path(archive_path).expanduser().resolve(strict=True)
+    if not path.is_file():
+        raise ArchiveValidationError(f"archive is not a regular file: {path}")
+
+    with tempfile.TemporaryDirectory(prefix="data-playbook-") as temporary:
+        destination = Path(temporary)
+        try:
+            with tarfile.open(path, "r:*") as archive:
+                members = _inspect_members(
+                    archive, max_members=max_members, max_bytes=max_bytes
+                )
+                files = _extract_files(archive, members, destination)
+        except (tarfile.TarError, OSError) as error:
+            raise ArchiveValidationError(f"could not read archive: {error}") from error
+
+        yield PreparedArchive(
+            archive_path=path,
+            archive_size=path.stat().st_size,
+            archive_sha256=_sha256_file(path),
+            files=files,
+        )
+
+
+def _normalise_prefix(prefix: str) -> str:
+    if "\x00" in prefix or "\\" in prefix:
+        raise ValueError("prefix cannot contain NUL bytes or backslashes")
+    value = prefix.strip("/")
+    parts = tuple(part for part in PurePosixPath(value).parts if part not in ("", "."))
+    if any(part == ".." for part in parts):
+        raise ValueError("prefix cannot contain parent traversal")
+    return PurePosixPath(*parts).as_posix() if parts else ""
+
+
+def _object_name(prefix: str, relative_path: str) -> str:
+    name = f"{prefix}/{relative_path}" if prefix else relative_path
+    if len(name.encode()) > 1_024:
+        raise ValueError(f"Cloud Storage object name exceeds 1,024 bytes: {name!r}")
+    return name
+
+
+def _matches_existing(blob: Any, *, sha256: str, size: int) -> bool:
+    blob.reload()
+    metadata = blob.metadata or {}
+    return (
+        blob.size is not None
+        and int(blob.size) == size
+        and metadata.get("sha256") == sha256
+    )
+
+
+def _upload_file(blob: Any, item: PreparedFile) -> str:
+    blob.metadata = {"sha256": item.sha256}
+    try:
+        blob.upload_from_filename(
+            str(item.local_path),
+            if_generation_match=0,
+            checksum="auto",
+            timeout=60,
+        )
+    except PreconditionFailed as error:
+        if _matches_existing(blob, sha256=item.sha256, size=item.size):
+            return "existing"
+        raise PublicationConflict(
+            f"gs://{blob.bucket.name}/{blob.name} already exists with different content"
+        ) from error
+    return "uploaded"
+
+
+def _upload_manifest(blob: Any, payload: bytes) -> str:
+    sha256 = hashlib.sha256(payload).hexdigest()
+    blob.metadata = {"sha256": sha256}
+    try:
+        blob.upload_from_string(
+            payload,
+            content_type="application/json; charset=utf-8",
+            if_generation_match=0,
+            checksum="auto",
+            timeout=60,
+        )
+    except PreconditionFailed as error:
+        if _matches_existing(blob, sha256=sha256, size=len(payload)):
+            return "existing"
+        raise PublicationConflict(
+            f"gs://{blob.bucket.name}/{blob.name} already exists with different content"
+        ) from error
+    return "uploaded"
+
+
+def publish_prepared_archive(
+    prepared: PreparedArchive,
+    *,
+    bucket_name: str,
+    prefix: str = "",
+    project: str | None = None,
+    client: Any | None = None,
+) -> PublicationResult:
+    """Publish validated files create-only and write the manifest last."""
+
+    normalized_prefix = _normalise_prefix(prefix)
+    storage_client = client or storage.Client(project=project)
+    bucket = storage_client.bucket(bucket_name)
+    uploaded: list[str] = []
+    existing: list[str] = []
+
+    for item in prepared.files:
+        object_name = _object_name(normalized_prefix, item.path)
+        status = _upload_file(bucket.blob(object_name), item)
+        (uploaded if status == "uploaded" else existing).append(object_name)
+
+    manifest_object = _object_name(normalized_prefix, MANIFEST_NAME)
+    manifest_status = _upload_manifest(
+        bucket.blob(manifest_object), prepared.manifest_bytes()
+    )
+    (uploaded if manifest_status == "uploaded" else existing).append(manifest_object)
+
+    return PublicationResult(
+        bucket=bucket_name,
+        prefix=normalized_prefix,
+        uploaded=tuple(uploaded),
+        existing=tuple(existing),
+        manifest_object=manifest_object,
+    )
+
+
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Validate a tar archive and publish its files create-only."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    def add_archive_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("archive", type=Path)
+        command.add_argument(
+            "--max-members", type=_positive_integer, default=DEFAULT_MAX_MEMBERS
+        )
+        command.add_argument(
+            "--max-bytes", type=_positive_integer, default=DEFAULT_MAX_BYTES
+        )
+
+    validate = subparsers.add_parser(
+        "validate", help="validate locally and print the deterministic manifest"
+    )
+    add_archive_arguments(validate)
+
+    publish = subparsers.add_parser(
+        "publish", help="publish files to Cloud Storage and write the manifest last"
+    )
+    add_archive_arguments(publish)
+    publish.add_argument("bucket")
+    publish.add_argument("--prefix", default="")
+    publish.add_argument("--project")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        with prepare_archive(
+            args.archive, max_members=args.max_members, max_bytes=args.max_bytes
+        ) as prepared:
+            if args.command == "validate":
+                print(json.dumps(prepared.manifest(), indent=2, sort_keys=True))
+                return 0
+
+            result = publish_prepared_archive(
+                prepared,
+                bucket_name=args.bucket,
+                prefix=args.prefix,
+                project=args.project,
+            )
+            print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+            return 0
+    except (ArchiveValidationError, PublicationConflict, OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

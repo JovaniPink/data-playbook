@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Keep GitHub Actions immutable in CI",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    }
+  ],
+  "regexManagers": [
+    {
+      "fileMatch": ["^\\.github/workflows/[^/]+\\.ya?ml$"],
+      "matchStrings": ["uv==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "uv",
+      "datasourceTemplate": "pypi"
+    }
+  ]
+}
