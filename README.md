@@ -9,6 +9,9 @@ The Markdown and SQL files remain reference notes. They are not packaged,
 tested deployment modules and should be reviewed for the target project before
 use.
 
+The repository knowledge map and shareable-note lifecycle are documented in
+[`docs/README.md`](docs/README.md).
+
 ## Archive publication contract
 
 `untar.py` separates local validation from cloud mutation:
