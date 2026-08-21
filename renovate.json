@@ -10,11 +10,13 @@
       "pinDigests": true
     }
   ],
-  "regexManagers": [
+  "customManagers": [
     {
-      "fileMatch": ["^\\.github/workflows/[^/]+\\.ya?ml$"],
-      "matchStrings": ["uv==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["version: \\\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\\\""],
       "depNameTemplate": "uv",
+      "packageNameTemplate": "uv",
       "datasourceTemplate": "pypi"
     }
   ]

@@ -21,11 +21,16 @@ The repository knowledge map and shareable-note lifecycle are documented in
 3. Reject absolute paths, parent traversal, backslashes, links, devices,
    duplicate normalized paths, and file/directory hierarchy collisions.
 4. Enforce member-count and total-uncompressed-byte limits.
-5. Stream accepted files into an automatically cleaned temporary directory while
+5. Copy and hash an exact, automatically cleaned local snapshot, then inspect and
+   extract only that snapshot so the archive lineage and extracted bytes cannot
+   come from different source revisions.
+6. Reserve `_manifest.json` for the publisher; an archive cannot supply its own
+   completion marker.
+7. Stream accepted files into an automatically cleaned temporary directory while
    calculating SHA-256 hashes.
-6. Upload every object with `if_generation_match=0`; an existing object is
+8. Upload every object with `if_generation_match=0`; an existing object is
    accepted only when its size and stored SHA-256 metadata match exactly.
-7. Write `_manifest.json` last. Its presence marks a complete publication.
+9. Write `_manifest.json` last. Its presence marks a complete publication.
 
 The default limits are 10,000 members and 1 GiB of uncompressed regular-file
 content. Use lower limits when the expected dataset permits it.
@@ -35,12 +40,12 @@ content. Use lower limits when the expected dataset permits it.
 Python 3.14 and [uv](https://docs.astral.sh/uv/) are required.
 
 ```bash
-python -m pip install uv==0.12.3
+python -m pip install uv==0.12.5
 uv sync --all-groups --frozen
 ```
 
 Runtime and development dependencies are exact-pinned in `pyproject.toml` and
-fully resolved in `uv.lock`. Renovate monitors Python packages, the uv installer,
+fully resolved in `uv.lock`. Renovate monitors Python packages, the uv workflow,
 and digest-pinned GitHub Actions.
 
 ## Validate locally
@@ -98,9 +103,10 @@ and never contact Google Cloud.
 
 Python warns that extracting untrusted archives without inspection can be
 dangerous even with modern extraction filters. Cloud Storage uploads overwrite
-live objects unless callers supply preconditions. This utility performs its own
-bounded member inspection and uses the create-only generation precondition on
-every write.
+live objects unless callers supply preconditions. This utility snapshots and
+hashes the exact bytes it inspects, rejects a source-supplied completion marker,
+performs its own bounded member inspection, and uses the create-only generation
+precondition on every write.
 
 - [Python `tarfile` security guidance](https://docs.python.org/3.14/library/tarfile.html)
 - [Cloud Storage request preconditions](https://cloud.google.com/storage/docs/request-preconditions)
