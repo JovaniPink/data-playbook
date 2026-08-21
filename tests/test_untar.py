@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tarfile
@@ -146,6 +147,38 @@ def test_prepare_archive_rejects_duplicate_normalized_paths(tmp_path: Path) -> N
         untar.prepare_archive(archive_path),
     ):
         pass
+
+
+@pytest.mark.parametrize("name", ["_manifest.json", "./_manifest.json"])
+def test_prepare_archive_rejects_reserved_completion_marker(
+    tmp_path: Path, name: str
+) -> None:
+    archive_path = make_archive(tmp_path, [(name, b"not-a-publication-manifest", None)])
+
+    with (
+        pytest.raises(untar.ArchiveValidationError, match="reserved publication path"),
+        untar.prepare_archive(archive_path),
+    ):
+        pass
+
+
+def test_prepare_archive_manifest_describes_the_validated_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = make_archive(tmp_path, [("one.txt", b"one", None)])
+    source_bytes = archive_path.read_bytes()
+    extract_files = untar._extract_files
+
+    def mutate_source_after_extract(*args: object, **kwargs: object):
+        prepared = extract_files(*args, **kwargs)
+        archive_path.write_bytes(b"source changed after the snapshot")
+        return prepared
+
+    monkeypatch.setattr(untar, "_extract_files", mutate_source_after_extract)
+    with untar.prepare_archive(archive_path) as prepared:
+        assert prepared.archive_size == len(source_bytes)
+        assert prepared.archive_sha256 == hashlib.sha256(source_bytes).hexdigest()
+        assert prepared.files[0].local_path.read_bytes() == b"one"
 
 
 def test_prepare_archive_rejects_file_parent_collision(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ from google.cloud import storage
 DEFAULT_MAX_MEMBERS = 10_000
 DEFAULT_MAX_BYTES = 1_073_741_824
 MANIFEST_NAME = "_manifest.json"
+RESERVED_MEMBER_PATHS = frozenset({MANIFEST_NAME})
 READ_CHUNK_SIZE = 1024 * 1024
 
 
@@ -108,12 +109,17 @@ class _Member:
     path: str
 
 
-def _sha256_file(path: Path) -> str:
+def _snapshot_archive(source_path: Path, snapshot_path: Path) -> tuple[int, str]:
+    """Copy and hash the exact source bytes that the validator will inspect."""
+
     digest = hashlib.sha256()
-    with path.open("rb") as source:
+    size = 0
+    with source_path.open("rb") as source, snapshot_path.open("xb") as snapshot:
         for chunk in iter(lambda: source.read(READ_CHUNK_SIZE), b""):
+            snapshot.write(chunk)
             digest.update(chunk)
-    return digest.hexdigest()
+            size += len(chunk)
+    return size, digest.hexdigest()
 
 
 def _normalise_member_path(name: str) -> str | None:
@@ -154,6 +160,11 @@ def _inspect_members(
             if member.isdir():
                 continue
             raise ArchiveValidationError("the archive root must be a directory")
+
+        if path in RESERVED_MEMBER_PATHS:
+            raise ArchiveValidationError(
+                f"archive member uses a reserved publication path: {path!r}"
+            )
 
         if not (member.isdir() or member.isreg()):
             raise ArchiveValidationError(
@@ -250,9 +261,13 @@ def prepare_archive(
         raise ArchiveValidationError(f"archive is not a regular file: {path}")
 
     with tempfile.TemporaryDirectory(prefix="data-playbook-") as temporary:
-        destination = Path(temporary)
+        temporary_root = Path(temporary)
+        snapshot_path = temporary_root / "archive.snapshot"
+        destination = temporary_root / "files"
         try:
-            with tarfile.open(path, "r:*") as archive:
+            destination.mkdir()
+            archive_size, archive_sha256 = _snapshot_archive(path, snapshot_path)
+            with tarfile.open(snapshot_path, "r:*") as archive:
                 members = _inspect_members(
                     archive, max_members=max_members, max_bytes=max_bytes
                 )
@@ -262,8 +277,8 @@ def prepare_archive(
 
         yield PreparedArchive(
             archive_path=path,
-            archive_size=path.stat().st_size,
-            archive_sha256=_sha256_file(path),
+            archive_size=archive_size,
+            archive_sha256=archive_sha256,
             files=files,
         )
 
