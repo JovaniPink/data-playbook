@@ -210,6 +210,25 @@ def test_prepare_archive_enforces_member_and_byte_limits(tmp_path: Path) -> None
         pass
 
 
+@pytest.mark.parametrize("root_name", [".", "./"])
+def test_prepare_archive_counts_ignored_root_directories(
+    tmp_path: Path, root_name: str
+) -> None:
+    archive_path = make_archive(
+        tmp_path,
+        [(root_name, None, None), (root_name, None, None), ("file.txt", b"ok", None)],
+    )
+
+    with (
+        pytest.raises(untar.ArchiveValidationError, match="member limit"),
+        untar.prepare_archive(archive_path, max_members=2),
+    ):
+        pass
+
+    with untar.prepare_archive(archive_path, max_members=3) as prepared:
+        assert [item.path for item in prepared.files] == ["file.txt"]
+
+
 def test_publish_is_create_only_nested_and_manifest_last(tmp_path: Path) -> None:
     archive_path = make_archive(
         tmp_path, [("folder/two.txt", b"two", None), ("one.txt", b"one", None)]

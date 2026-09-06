@@ -154,7 +154,11 @@ def _inspect_members(
 
     # Iterate lazily so the member ceiling stops header parsing instead of first
     # materializing an unbounded list with TarFile.getmembers().
-    for member in archive:
+    for member_count, member in enumerate(archive, start=1):
+        if member_count > max_members:
+            raise ArchiveValidationError(
+                f"archive exceeds the {max_members:,} member limit"
+            )
         path = _normalise_member_path(member.name)
         if path is None:
             if member.isdir():
@@ -177,10 +181,6 @@ def _inspect_members(
 
         seen.add(path)
         accepted.append(_Member(member=member, path=path))
-        if len(accepted) > max_members:
-            raise ArchiveValidationError(
-                f"archive exceeds the {max_members:,} member limit"
-            )
 
         if member.isreg():
             if member.size < 0:

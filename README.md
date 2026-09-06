@@ -32,8 +32,8 @@ The repository knowledge map and shareable-note lifecycle are documented in
    accepted only when its size and stored SHA-256 metadata match exactly.
 9. Write `_manifest.json` last. Its presence marks a complete publication.
 
-The default limits are 10,000 members and 1 GiB of uncompressed regular-file
-content. Use lower limits when the expected dataset permits it.
+The default limits are 10,000 members, including ignored root directories, and
+1 GiB of uncompressed regular-file content. Use lower limits when the expected dataset permits it.
 
 ## Set up
 
