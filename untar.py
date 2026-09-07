@@ -8,8 +8,11 @@ written last. A manifest therefore marks a complete publication.
 from __future__ import annotations
 
 import argparse
+import bz2
+import gzip
 import hashlib
 import json
+import lzma
 import sys
 import tarfile
 import tempfile
@@ -27,6 +30,7 @@ DEFAULT_MAX_BYTES = 1_073_741_824
 MANIFEST_NAME = "_manifest.json"
 RESERVED_MEMBER_PATHS = frozenset({MANIFEST_NAME})
 READ_CHUNK_SIZE = 1024 * 1024
+MAX_CONSECUTIVE_METADATA_HEADERS = 64
 
 
 class ArchiveValidationError(ValueError):
@@ -35,6 +39,62 @@ class ArchiveValidationError(ValueError):
 
 class PublicationConflict(RuntimeError):
     """An object already exists with content different from this publication."""
+
+
+def _bounded_raw_header_scan(path: Path, *, max_members: int) -> None:
+    """Bound headers tarfile consumes internally before it yields a member."""
+
+    with path.open("rb") as raw:
+        magic = raw.read(6)
+    opener = (
+        gzip.open
+        if magic.startswith(b"\x1f\x8b")
+        else bz2.open
+        if magic.startswith(b"BZh")
+        else lzma.open
+        if magic.startswith(b"\xfd7zXZ\x00")
+        else open
+    )
+    count = 0
+    metadata_chain = 0
+    with opener(path, "rb") as source:
+        while True:
+            header = source.read(512)
+            if not header or header == b"\0" * 512:
+                return
+            if len(header) != 512:
+                raise ArchiveValidationError("archive ends inside a tar header")
+            count += 1
+            if count > max_members:
+                raise ArchiveValidationError(
+                    f"archive exceeds the {max_members:,} member limit"
+                )
+            type_flag = header[156:157]
+            metadata_types = {
+                tarfile.XHDTYPE,
+                tarfile.XGLTYPE,
+                tarfile.GNUTYPE_LONGNAME,
+                tarfile.GNUTYPE_LONGLINK,
+            }
+            if type_flag in metadata_types:
+                metadata_chain += 1
+                if metadata_chain > MAX_CONSECUTIVE_METADATA_HEADERS:
+                    raise ArchiveValidationError(
+                        "archive contains too many consecutive metadata headers"
+                    )
+            else:
+                metadata_chain = 0
+            try:
+                size = tarfile.nti(header[124:136])
+            except ValueError as error:
+                raise ArchiveValidationError(
+                    "archive contains an invalid member size"
+                ) from error
+            if size < 0:
+                raise ArchiveValidationError("archive contains a negative member size")
+            padded_size = ((size + 511) // 512) * 512
+            if len(source.read(padded_size)) != padded_size:
+                raise ArchiveValidationError("archive ends inside a member payload")
 
 
 @dataclass(frozen=True)
@@ -154,7 +214,11 @@ def _inspect_members(
 
     # Iterate lazily so the member ceiling stops header parsing instead of first
     # materializing an unbounded list with TarFile.getmembers().
-    for member in archive:
+    for member_count, member in enumerate(archive, start=1):
+        if member_count > max_members:
+            raise ArchiveValidationError(
+                f"archive exceeds the {max_members:,} member limit"
+            )
         path = _normalise_member_path(member.name)
         if path is None:
             if member.isdir():
@@ -177,10 +241,6 @@ def _inspect_members(
 
         seen.add(path)
         accepted.append(_Member(member=member, path=path))
-        if len(accepted) > max_members:
-            raise ArchiveValidationError(
-                f"archive exceeds the {max_members:,} member limit"
-            )
 
         if member.isreg():
             if member.size < 0:
@@ -267,12 +327,13 @@ def prepare_archive(
         try:
             destination.mkdir()
             archive_size, archive_sha256 = _snapshot_archive(path, snapshot_path)
+            _bounded_raw_header_scan(snapshot_path, max_members=max_members)
             with tarfile.open(snapshot_path, "r:*") as archive:
                 members = _inspect_members(
                     archive, max_members=max_members, max_bytes=max_bytes
                 )
                 files = _extract_files(archive, members, destination)
-        except (tarfile.TarError, OSError) as error:
+        except (tarfile.TarError, OSError, RecursionError) as error:
             raise ArchiveValidationError(f"could not read archive: {error}") from error
 
         yield PreparedArchive(

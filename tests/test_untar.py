@@ -210,6 +210,66 @@ def test_prepare_archive_enforces_member_and_byte_limits(tmp_path: Path) -> None
         pass
 
 
+@pytest.mark.parametrize("root_name", [".", "./"])
+def test_prepare_archive_counts_ignored_root_directories(
+    tmp_path: Path, root_name: str
+) -> None:
+    archive_path = make_archive(
+        tmp_path,
+        [(root_name, None, None), (root_name, None, None), ("file.txt", b"ok", None)],
+    )
+
+    with (
+        pytest.raises(untar.ArchiveValidationError, match="member limit"),
+        untar.prepare_archive(archive_path, max_members=2),
+    ):
+        pass
+
+    with untar.prepare_archive(archive_path, max_members=3) as prepared:
+        assert [item.path for item in prepared.files] == ["file.txt"]
+
+
+def test_prepare_archive_counts_pax_headers_before_tarfile_filters_them(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "pax.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        for index in range(2):
+            header = tarfile.TarInfo(f"pax-{index}")
+            header.type = tarfile.XHDTYPE
+            archive.addfile(header)
+        content = b"ok"
+        file_info = tarfile.TarInfo("file.txt")
+        file_info.size = len(content)
+        archive.addfile(file_info, io.BytesIO(content))
+
+    with (
+        pytest.raises(untar.ArchiveValidationError, match="member limit"),
+        untar.prepare_archive(archive_path, max_members=2),
+    ):
+        pass
+
+
+def test_prepare_archive_rejects_unbounded_metadata_header_chains(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "pax-chain.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        for index in range(untar.MAX_CONSECUTIVE_METADATA_HEADERS + 1):
+            header = tarfile.TarInfo(f"pax-{index}")
+            header.type = tarfile.XHDTYPE
+            archive.addfile(header)
+
+    with (
+        pytest.raises(
+            untar.ArchiveValidationError,
+            match="too many consecutive metadata headers",
+        ),
+        untar.prepare_archive(archive_path),
+    ):
+        pass
+
+
 def test_publish_is_create_only_nested_and_manifest_last(tmp_path: Path) -> None:
     archive_path = make_archive(
         tmp_path, [("folder/two.txt", b"two", None), ("one.txt", b"one", None)]
