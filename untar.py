@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from google.api_core.exceptions import PreconditionFailed
+from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
 
 DEFAULT_MAX_MEMBERS = 10_000
@@ -388,7 +388,7 @@ def _matches_existing(blob: Any, *, sha256: str, size: int) -> bool:
                 if consumed > size:
                     return False
                 digest.update(chunk)
-    except PreconditionFailed:
+    except NotFound, PreconditionFailed:
         return False
     return consumed == size and digest.hexdigest() == sha256
 
