@@ -29,7 +29,8 @@ The repository knowledge map and shareable-note lifecycle are documented in
 7. Stream accepted files into an automatically cleaned temporary directory while
    calculating SHA-256 hashes.
 8. Upload every object with `if_generation_match=0`; an existing object is
-   accepted only when its size and stored SHA-256 metadata match exactly.
+   accepted only when its size, stored SHA-256 metadata, and a bounded SHA-256
+   readback of its loaded generation all match.
 9. Write `_manifest.json` last. Its presence marks a complete publication.
 
 The default limits are 10,000 members, including ignored root directories, and
@@ -75,7 +76,7 @@ uv run python untar.py publish ./source.tar.gz example-bucket \
   --prefix imports/2026-08-12/source-a
 ```
 
-The caller needs permission to create objects and read object metadata in the
+The caller needs permission to create objects and read object bytes and metadata in the
 target bucket. This tool does not create buckets, change IAM, delete objects, or
 overwrite an existing generation.
 

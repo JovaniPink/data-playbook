@@ -40,6 +40,7 @@ class FakeBlob:
         self.name = name
         self.metadata: dict[str, str] | None = None
         self.size: int | None = None
+        self.generation: int | None = None
 
     def upload_from_filename(self, filename: str, **kwargs: Any) -> None:
         self.bucket.calls.append((self.name, "file", kwargs))
@@ -65,6 +66,16 @@ class FakeBlob:
         metadata = existing["metadata"]
         assert isinstance(metadata, dict)
         self.metadata = metadata
+        self.generation = 1
+
+    def open(self, mode: str, **kwargs: Any) -> io.BytesIO:
+        assert mode == "rb"
+        assert kwargs["if_generation_match"] == self.generation
+        assert kwargs["chunk_size"] == untar.READ_CHUNK_SIZE
+        assert kwargs["raw_download"] is True
+        payload = self.bucket.objects[self.name]["payload"]
+        assert isinstance(payload, bytes)
+        return io.BytesIO(payload)
 
 
 class FakeBucket:
@@ -345,3 +356,66 @@ def test_validate_cli_does_not_construct_storage_client(
     monkeypatch.setattr(untar.storage, "Client", fail_client)
     assert untar.main(["validate", str(archive_path)]) == 0
     assert json.loads(capsys.readouterr().out)["file_count"] == 1
+
+
+def test_publish_rejects_same_size_bytes_with_matching_metadata(tmp_path: Path) -> None:
+    archive_path = make_archive(tmp_path, [("one.txt", b"one", None)])
+    client = FakeClient()
+    bucket = client.bucket("example")
+    bucket.objects["run/one.txt"] = {
+        "payload": b"two",
+        "metadata": {"sha256": hashlib.sha256(b"one").hexdigest()},
+    }
+    with (
+        untar.prepare_archive(archive_path) as prepared,
+        pytest.raises(untar.PublicationConflict, match="different content"),
+    ):
+        untar.publish_prepared_archive(
+            prepared, bucket_name="example", prefix="run", client=client
+        )
+    assert "run/_manifest.json" not in bucket.objects
+
+
+def test_publish_rejects_corrupt_completion_marker_with_matching_metadata(
+    tmp_path: Path,
+) -> None:
+    archive_path = make_archive(tmp_path, [("one.txt", b"one", None)])
+    client = FakeClient()
+    with untar.prepare_archive(archive_path) as prepared:
+        untar.publish_prepared_archive(
+            prepared, bucket_name="example", prefix="run", client=client
+        )
+        marker = client.bucket("example").objects["run/_manifest.json"]
+        payload = marker["payload"]
+        assert isinstance(payload, bytes)
+        marker["payload"] = b"x" + payload[1:]
+        with pytest.raises(untar.PublicationConflict, match="different content"):
+            untar.publish_prepared_archive(
+                prepared, bucket_name="example", prefix="run", client=client
+            )
+
+
+def test_publish_stops_when_existing_generation_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = make_archive(tmp_path, [("one.txt", b"one", None)])
+    client = FakeClient()
+    client.bucket("example").objects["run/one.txt"] = {
+        "payload": b"one",
+        "metadata": {"sha256": hashlib.sha256(b"one").hexdigest()},
+    }
+
+    def changed_generation(self: FakeBlob, mode: str, **kwargs: Any) -> io.BytesIO:
+        assert kwargs["if_generation_match"] == 1
+        raise PreconditionFailed("generation changed")
+
+    monkeypatch.setattr(FakeBlob, "open", changed_generation)
+    with (
+        untar.prepare_archive(archive_path) as prepared,
+        pytest.raises(untar.PublicationConflict),
+    ):
+        untar.publish_prepared_archive(
+            prepared, bucket_name="example", prefix="run", client=client
+        )
+    assert "run/_manifest.json" not in client.bucket("example").objects
