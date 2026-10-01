@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from google.api_core.exceptions import PreconditionFailed
+from google.api_core.exceptions import NotFound, PreconditionFailed
 
 import untar
 
@@ -395,9 +395,11 @@ def test_publish_rejects_corrupt_completion_marker_with_matching_metadata(
             )
 
 
+@pytest.mark.parametrize("failure", [PreconditionFailed, NotFound])
 def test_publish_stops_when_existing_generation_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure: type[PreconditionFailed] | type[NotFound],
 ) -> None:
     archive_path = make_archive(tmp_path, [("one.txt", b"one", None)])
     client = FakeClient()
@@ -408,7 +410,7 @@ def test_publish_stops_when_existing_generation_changes(
 
     def changed_generation(self: FakeBlob, mode: str, **kwargs: Any) -> io.BytesIO:
         assert kwargs["if_generation_match"] == 1
-        raise PreconditionFailed("generation changed")
+        raise failure("generation changed")
 
     monkeypatch.setattr(FakeBlob, "open", changed_generation)
     with (
