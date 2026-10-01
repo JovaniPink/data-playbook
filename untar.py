@@ -364,11 +364,33 @@ def _object_name(prefix: str, relative_path: str) -> str:
 def _matches_existing(blob: Any, *, sha256: str, size: int) -> bool:
     blob.reload()
     metadata = blob.metadata or {}
-    return (
-        blob.size is not None
-        and int(blob.size) == size
-        and metadata.get("sha256") == sha256
-    )
+    if (
+        blob.size is None
+        or int(blob.size) != size
+        or metadata.get("sha256") != sha256
+        or blob.generation is None
+    ):
+        return False
+    # Custom SHA metadata is caller-writable. Verify the bytes of the loaded
+    # generation, with bounded reads, before treating a collision as reusable.
+    digest = hashlib.sha256()
+    consumed = 0
+    try:
+        with blob.open(
+            "rb",
+            chunk_size=READ_CHUNK_SIZE,
+            if_generation_match=blob.generation,
+            raw_download=True,
+            timeout=60,
+        ) as source:
+            while chunk := source.read(min(READ_CHUNK_SIZE, size - consumed + 1)):
+                consumed += len(chunk)
+                if consumed > size:
+                    return False
+                digest.update(chunk)
+    except PreconditionFailed:
+        return False
+    return consumed == size and digest.hexdigest() == sha256
 
 
 def _upload_file(blob: Any, item: PreparedFile) -> str:
