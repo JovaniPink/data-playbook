@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Bounded tar validation and create-only Cloud Storage publication"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-  "google-cloud-storage==3.13.1",
+  "google-cloud-storage==3.17.0",
 ]
 
 [dependency-groups]
